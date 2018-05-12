@@ -3,366 +3,393 @@
 
 using namespace Utility;
 
-CallHook<bool(*)(__int64)> * g_task_weapon_flags_orig_hook;
+UIText g_reloadText( "Reload", 640.0f, 674.0f, 0.59f, FontCCCLocalized, AlignCenter, 255, 255, 255, 255, true );
 
-CallHook<bool(*)(CWeapon*)> * g_reload_check_orig_hook;
-
-CallHook<void(*)(CWeapon*, char)> * g_set_ammo_in_clip_orig_hook;
-
-UIText g_reloadText("Reload", 640.0f, 674.0f, 0.59f, FontCCCLocalized, AlignCenter, 255, 255, 255, 255, true);
-
-static CConfig g_configFile("ManualReload.ini");
+static CConfig g_configFile( "ManualReload.ini" );
 
 bytepatch_t setWeaponFlagsPatch;
 
-uintptr_t g_pedWeaponMgrOffset, 
+uintptr_t g_pedWeaponMgrOffset,
           g_aimTaskWeaponFlagsOffset,
           g_weaponClipComponentOffset,
           g_weaponInfoTimeBetweenShotsOffset;
 
-typedef CWeapon* (*CPedWeaponMgr__GetCurrentWeapon)(LPVOID);
+typedef CWeapon* ( *CPedWeaponMgr__GetCurrentWeapon )( LPVOID );
 CPedWeaponMgr__GetCurrentWeapon g_getCurrentWeapon;
 
+Ped g_playerPed;
+
 struct CScriptConfig {
-	bool DiscardClipAmmo;
-	bool UseReloadText;
-	bool UseReloadHelpText;
-	bool UseEmptyChamberSound;
-	char AltReloadText[256];
+    bool DiscardClipAmmo;
+    bool UseReloadText;
+    bool UseReloadHelpText;
+    bool UseEmptyChamberSound;
+    char AltReloadText[256];
 } g_userConfig;
 
-void readUserConfig()
-{
-	g_userConfig.DiscardClipAmmo = g_configFile.get("General", "DiscardClipAmmo", true);
+static CallHook<void( * )( CWeapon*, char )> * g_set_ammo_in_clip_orig_hook;
 
-	g_userConfig.UseReloadText = g_configFile.get("General", "UseReloadText", true);
+static CallHook<bool( * )( CWeapon* )> * g_reload_check_orig_hook;
 
-	g_userConfig.UseReloadHelpText = g_configFile.get("General", "UseReloadHelpText", false);
+static JmpHook<int( * )( uint64_t )> * g_task_on_swap_weap_hook;
 
-	g_userConfig.UseEmptyChamberSound = g_configFile.get("General", "UseEmptyChamberSound", true);
+static CallHook<bool( * )( uint64_t )> * g_task_weapon_flags_orig_hook;
 
-	g_configFile.getText(g_userConfig.AltReloadText, "General", "AltReloadText");
+void readUserConfig() {
+
+    g_userConfig.DiscardClipAmmo = g_configFile.get( "General", "DiscardClipAmmo", true );
+
+    g_userConfig.UseReloadText = g_configFile.get( "General", "UseReloadText", true );
+
+    g_userConfig.UseReloadHelpText = g_configFile.get( "General", "UseReloadHelpText", false );
+
+    g_userConfig.UseEmptyChamberSound = g_configFile.get( "General", "UseEmptyChamberSound", true );
+
+    g_configFile.getText( g_userConfig.AltReloadText, "General", "AltReloadText" );
 }
 
-CWeapon * getCurrentPedWeapon(Ped ped)
-{
-	auto address = getScriptHandleBaseAddress(ped);
+CWeapon * getCurrentPedWeapon( const Ped ped ) {
 
-	auto weaponMgr = *(void**)(address + g_pedWeaponMgrOffset);
+    const auto address = getScriptHandleBaseAddress( ped );
 
-	return g_getCurrentWeapon(weaponMgr);
+    const auto weaponMgr = *reinterpret_cast<void**>(
+                               reinterpret_cast<uintptr_t>( address ) + g_pedWeaponMgrOffset );
+
+    return g_getCurrentWeapon( weaponMgr );
 }
 
-void SetAmmoInClip_Hook(CWeapon* weapon, char bAltAmmmo)
-{
-	if (g_userConfig.DiscardClipAmmo)
-	{
-		auto clipComponent = *(CWeaponComponentClip**)((uintptr_t)weapon + g_weaponClipComponentOffset);
+void SetAmmoInClip_Hook( CWeapon* weapon, char bAltAmmmo ) {
 
-		auto clipSize = clipComponent ? clipComponent->info->clipSize : weapon->info->clipSize;
+    if ( weapon->pInventoryPed->GetOwner() == getScriptHandleBaseAddress( g_playerPed ) &&
+            g_userConfig.DiscardClipAmmo ) {
+        weapon->totalAmmo -= weapon->info->clipSize;
 
-		weapon->totalAmmo -= clipSize;
+        weapon->totalAmmo += weapon->info->clipSize - weapon->ammoInClip;
 
-		weapon->totalAmmo += clipSize - weapon->ammoInClip;
+        weapon->pInventoryPed->SetWeaponAmmo( weapon->info->dwNameHash, weapon->totalAmmo );
+    }
 
-		weapon->pInventoryPed->SetWeaponAmmo(weapon->info->dwNameHash, weapon->totalAmmo);
-	}
-
-	g_set_ammo_in_clip_orig_hook->fn(weapon, bAltAmmmo);
+    g_set_ammo_in_clip_orig_hook->fn( weapon, bAltAmmmo );
 }
 
 bool bReloadingWeapon = false;
 
-bool CWeapon_CanBeReloaded_Hook(CWeapon* weapon)
-{
-	if (weapon->ammoInClip > 0)
-		return g_reload_check_orig_hook->fn(weapon);
+bool CWeapon_CanBeReloaded_Hook( CWeapon * weapon ) {
 
-	return bReloadingWeapon;
+    if ( weapon->ammoInClip > 0 || weapon->pInventoryPed &&
+         weapon->pInventoryPed->GetOwner() != getScriptHandleBaseAddress( g_playerPed ) )
+        return g_reload_check_orig_hook->fn( weapon );
+
+    return bReloadingWeapon;
 }
 
-bool CTaskAimGunOnFoot_UpdateWeaponFlags_Hook(int64_t task)
-{
-	if (bReloadingWeapon)
-	{
-		*(BYTE*)(task + g_aimTaskWeaponFlagsOffset) |= 0x20;
-		return true;
-	}
+int CTaskSwapWeapon_UpdateOnSwap_Hook( uint64_t ctask ) {
 
-	return false;
+    const auto ped = *reinterpret_cast<void**>( ctask + 0x10 );
+
+    if ( ped == getScriptHandleBaseAddress( g_playerPed ) ) {
+        const auto weaponMgr = *reinterpret_cast<LPVOID*>(
+                                   reinterpret_cast<uintptr_t>( ped ) + g_pedWeaponMgrOffset );
+
+        const auto weapon = g_getCurrentWeapon( weaponMgr );
+
+        if ( weapon && weapon->info->dwGroupHash == 2725924767u ) {
+            *( BYTE* )( ctask + 0xEC ) |= 4;
+        }
+    }
+
+    return g_task_on_swap_weap_hook->fn( ctask );
+}
+
+bool CTaskAimGunOnFoot_UpdateWeaponFlags_Hook( uint64_t ctask ) {
+
+    if ( *reinterpret_cast<LPVOID*>( ctask + 0x10 ) != getScriptHandleBaseAddress( g_playerPed ) )
+        return g_task_weapon_flags_orig_hook->fn( ctask );
+
+    if ( bReloadingWeapon ) {
+        *( BYTE* )( ctask + g_aimTaskWeaponFlagsOffset ) |= 0x20;
+        return true;
+    }
+
+    return false;
 }
 
 bool bInitialized = false;
 
-bool initialize(eGameVersion version)
-{
-	g_aimTaskWeaponFlagsOffset = version > VER_1_0_877_1_NOSTEAM ? 0x12C : 0x11C;
+bool initialize( const eGameVersion version ) {
 
-	g_weaponInfoTimeBetweenShotsOffset = version > VER_1_0_1032_1_NoSteam ? 0x134 : 0x11C;
+    g_aimTaskWeaponFlagsOffset = version > VER_1_0_877_1_NOSTEAM ? 0x12C : 0x11C;
 
-	#pragma region CanBeReloaded Hook (CTaskGun::UpdateBasic)
+    g_weaponInfoTimeBetweenShotsOffset = version > VER_1_0_1032_1_NoSteam ? 0x134 : 0x11C;
 
-	auto pattern = BytePattern((BYTE*)"\xB8\x04\x00\x00\x00\x44\x3B\x00\x74\x17\x84\x00\x00\x00\x00\x00", "xxxxxxx?xxx?????");
+    #pragma region CanBeReloaded Hook (CTaskGun::UpdateBasic)
 
-	if (!pattern.bSuccess)
-	{
-		LOG("Failed to find address #1. Exiting...");
-		return false;
-	}
+    auto pattern = BytePattern( ( BYTE* )"\xB8\x04\x00\x00\x00\x44\x3B\x00\x74\x17\x84\x00\x00\x00\x00\x00", "xxxxxxx?xxx?????" );
 
-	g_reload_check_orig_hook = HookManager::SetCall(pattern.get(36), CWeapon_CanBeReloaded_Hook);
+    if ( !pattern.bSuccess ) {
+        LOG( "Failed to find address #1. Exiting..." );
+        return false;
+    }
 
-	#pragma endregion
+    g_reload_check_orig_hook = HookManager::SetCall( pattern.get( 36 ), CWeapon_CanBeReloaded_Hook );
 
-	#pragma region CanBeReloaded Hook (CTaskInCover::ShouldReloadWeapon)
+    #pragma endregion
 
-	pattern = BytePattern((BYTE*)"\x75\x12\x80\x78\x36\x09", "xxxxxx");
+    #pragma region CanBeReloaded Hook (CTaskInCover::ShouldReloadWeapon)
 
-	if (!pattern.bSuccess)
-	{
-		LOG("Failed to find address #2. Exiting...");
-		return false;
-	}
+    pattern = BytePattern( ( BYTE* )"\x75\x12\x80\x78\x36\x09", "xxxxxx" );
 
-	g_reload_check_orig_hook->add(pattern.get(43));
+    if ( !pattern.bSuccess ) {
+        LOG( "Failed to find address #2. Exiting..." );
+        return false;
+    }
 
-	#pragma endregion
+    g_reload_check_orig_hook->add( pattern.get( 43 ) );
 
-	#pragma region WeaponOkCheck
+    #pragma endregion
 
-	pattern = BytePattern((BYTE*)"\xE8\x00\x00\x00\x00\x8D\x43\xFF\x83\xF8\x03", "x????xxxxxx");
+    #pragma region OnSwap Hook (CTaskSwapWeapon::UpdateOnSwap)
 
-	if (!pattern.bSuccess)
-	{
-		LOG("Failed to find address #3. Exiting...");
-		return false;
-	}
+    pattern = BytePattern( ( BYTE* )"\x48\x83\xC4\x20\x5B\xE9\x00\x00\x00\x00\x83\xFA\x06\x75\x07", "xxxxxx????xxxxx" );
 
-	auto address = pattern.get(1);
+    if ( !pattern.bSuccess ) {
+        LOG( "Failed to find address #3. Exiting..." );
+        return false;
+    }
 
-	// nested function CTaskAimGunOnFoot::UpdateWeaponFlags+10
-	address = *(int32_t*)address + address + 4 + 10; 
+//	g_task_on_swap_weap_hook = HookManager::SetJmp((PBYTE)pattern.get(5), CTaskSwapWeapon_UpdateOnSwap_Hook);
 
-	// nested function CTaskAimGunOnFoot::IsWeaponReady+66
-	address = *(int32_t*)address + address + 4 + 66; 
+    #pragma endregion
 
-	g_pedWeaponMgrOffset = *(int32_t*)address;
+    #pragma region WeaponOkCheck
 
-	address += 5;
+    pattern = BytePattern( ( BYTE* )"\xE8\x00\x00\x00\x00\x8D\x43\xFF\x83\xF8\x03", "x????xxxxxx" );
 
-	address = *(int32_t*)address + address + 4;
+    if ( !pattern.bSuccess ) {
+        LOG( "Failed to find address #4. Exiting..." );
+        return false;
+    }
 
-	g_getCurrentWeapon = (CPedWeaponMgr__GetCurrentWeapon)address;
+    auto address = pattern.get( 1 );
 
-	g_task_weapon_flags_orig_hook = HookManager::SetCall(pattern.get(), CTaskAimGunOnFoot_UpdateWeaponFlags_Hook);
+    // nested function CTaskAimGunOnFoot::UpdateWeaponFlags+10
+    address = *( int32_t* )address + address + 4 + 10;
 
-	#pragma endregion
+    // nested function CTaskAimGunOnFoot::IsWeaponReady+66
+    address = *( int32_t* )address + address + 4 + 66;
 
-	#pragma region SetWeaponFlagsPatch (CTaskAimGunOnFoot)
+    g_pedWeaponMgrOffset = *( int32_t* )address;
 
-	pattern = BytePattern((BYTE*)"\x8B\x4D\x00\x8D\x41\xFE\x41\x3B", "xx?xxxxx");
+    address += 5;
 
-	if (!pattern.bSuccess)
-	{
-		LOG("Failed to find address #4. Exiting...");
-		return false;
-	}
+    address = *( int32_t* )address + address + 4;
 
-	// don't disable aiming for an invalid total ammo count..
-	setWeaponFlagsPatch = bytepatch_t(pattern.get(version > VER_1_0_463_1_NOSTEAM ? 91u : 67u), std::vector<BYTE>(8, NOP));
+    g_getCurrentWeapon = ( CPedWeaponMgr__GetCurrentWeapon )address;
 
-	setWeaponFlagsPatch.install();
+    g_task_weapon_flags_orig_hook = HookManager::SetCall( pattern.get(), CTaskAimGunOnFoot_UpdateWeaponFlags_Hook );
 
-	#pragma endregion
+    #pragma endregion
 
-	if (version > VER_1_0_463_1_NOSTEAM)
-	{
-		#pragma region SetAmmoInClip (CTaskReloadWeapon)
+    #pragma region SetWeaponFlagsPatch (CTaskAimGunOnFoot)
 
-		pattern = BytePattern((BYTE*)"\x31\x82\x00\x00\x00\x00\x80\x79\x36\x01", "xx????xxxx");
+    pattern = BytePattern( ( BYTE* )"\x8B\x4D\x00\x8D\x41\xFE\x41\x3B", "xx?xxxxx" );
 
-		if (!pattern.bSuccess)
-		{
-			LOG("Failed to find address #5. Exiting...");
-			return false;
-		}
+    if ( !pattern.bSuccess ) {
+        LOG( "Failed to find address #5. Exiting..." );
+        return false;
+    }
 
-		address = pattern.get(13);
+    // don't disable aiming for an invalid total ammo count..
+    setWeaponFlagsPatch = bytepatch_t( pattern.get( version > VER_1_0_463_1_NOSTEAM ? 91u : 67u ), std::vector<BYTE>( 8, NOP ) );
 
-		address = *(int32_t*)address + address + 168;
+    setWeaponFlagsPatch.install();
 
-		auto address2 = address + 1;
+    #pragma endregion
 
-		address2 = *(int32_t*)address2 + address2 + 4;
+    if ( version > VER_1_0_463_1_NOSTEAM ) {
+        #pragma region SetAmmoInClip (CTaskReloadWeapon)
 
-		g_set_ammo_in_clip_orig_hook = HookManager::SetCall(address, SetAmmoInClip_Hook);
+        pattern = BytePattern( ( BYTE* )"\x31\x82\x00\x00\x00\x00\x80\x79\x36\x01", "xx????xxxx" );
 
-		g_weaponClipComponentOffset = *(int32_t*)(address2 + 0x2B);
+        if ( !pattern.bSuccess ) {
+            LOG( "Failed to find address #6. Exiting..." );
+            return false;
+        }
 
-		#pragma endregion
+        address = pattern.get( 13 );
 
-		#pragma region g_persistWeaponAmmoStats toggle
+        address = *( int32_t* )address + address + 168;
 
-		pattern = BytePattern((BYTE*)"\x44\x38\x2D\x00\x00\x00\x00\x74\x1B\x48\x8B\x47\x20", "xxx????xxxxxx");
+        auto address2 = address + 1;
 
-		if (pattern.bSuccess)
-		{
-			address = pattern.get(3);
+        address2 = *( int32_t* )address2 + address2 + 4;
 
-			address = *(int32_t*)address + address + 4;
+        g_set_ammo_in_clip_orig_hook = HookManager::SetCall( address, SetAmmoInClip_Hook );
 
-			*(BOOL*)address = 1; // always use ammo inventory
-		}
+        g_weaponClipComponentOffset = *( int32_t* )( address2 + 0x2B );
 
-		#pragma endregion
-	}
+        #pragma endregion
 
-	return bInitialized = true;
+        #pragma region g_persistWeaponAmmoStats toggle
+
+        pattern = BytePattern( ( BYTE* )"\x44\x38\x2D\x00\x00\x00\x00\x74\x1B\x48\x8B\x47\x20", "xxx????xxxxxx" );
+
+        if ( pattern.bSuccess ) {
+            address = pattern.get( 3 );
+
+            address = *( int32_t* )address + address + 4;
+
+            *( BOOL* )address = 1; // always use ammo inventory
+        }
+
+        #pragma endregion
+    }
+
+    return bInitialized = true;
 }
 
-int getLanguageTextId()
-{
-	auto uiLanguage = UNK::_GET_UI_LANGUAGE_ID();
+int getLanguageTextId() {
 
-	if (uiLanguage == 11)
-		uiLanguage = 4;
+    auto uiLanguage = UNK::_GET_UI_LANGUAGE_ID();
 
-	return uiLanguage;
+    if ( uiLanguage == 11 )
+        uiLanguage = 4;
+
+    return uiLanguage;
 }
 
-void main()
-{
-	auto gameVersion = getGameVersion();
+void main() {
 
-	if (gameVersion == VER_UNK) return;
+    const auto gameVersion = getGameVersion();
 
-	readUserConfig();
+    if ( gameVersion == VER_UNK ) return;
 
-	if (bInitialized || initialize(gameVersion)) {
+    readUserConfig();
 
-		auto keyStr = std::string(CONTROLS::GET_CONTROL_INSTRUCTIONAL_BUTTON(0, ControlReload, TRUE));
+    if ( bInitialized || initialize( gameVersion ) ) {
 
-		auto it = keyStr.find_last_of("_");
+        auto keyStr = std::string( CONTROLS::GET_CONTROL_INSTRUCTIONAL_BUTTON( 0, ControlReload, TRUE ) );
 
-		if (it != std::string::npos)
-			it += 1;
+        auto it = keyStr.find_last_of( "_" );
 
-		keyStr = keyStr.substr(it);
+        if ( it != std::string::npos )
+            it += 1;
 
-		auto reloadText = g_userConfig.AltReloadText[0] == '\0' ? 
-			getConstString(getLanguageTextId(), RELOAD_TEXT) : g_userConfig.AltReloadText;
+        keyStr = keyStr.substr( it );
 
-		g_reloadText.SetText(FormatString("%s [%s]", reloadText, keyStr.c_str()));
+        const auto reloadText = g_userConfig.AltReloadText[0] == '\0' ?
+                                getConstString( getLanguageTextId(), RELOAD_TEXT ) : g_userConfig.AltReloadText;
 
-		run();
-	}
+        g_reloadText.SetText( FormatString( "%s [%s]", reloadText, keyStr.c_str() ) );
+
+        run();
+    }
 }
 
 int weaponSoundPlayTime = 0;
 
 bool weaponSoundTimerEnabled = false;
 
-inline void playEmptyChamberSound(int waitTime = 0)
-{
-	weaponSoundPlayTime = GAMEPLAY::GET_GAME_TIMER() + waitTime;
+inline void playEmptyChamberSound( const int waitTime = 0 ) {
 
-	weaponSoundTimerEnabled = true;
+    weaponSoundPlayTime = GAMEPLAY::GET_GAME_TIMER() + waitTime;
+
+    weaponSoundTimerEnabled = true;
 }
 
-inline void updateWeaponSounds(Weapon weap)
-{
-	if (weaponSoundTimerEnabled) {
+inline void updateWeaponSounds( const Weapon weap ) {
 
-		if (GAMEPLAY::GET_GAME_TIMER() < weaponSoundPlayTime)
-			return;
-		// for delayed trigger sounds, make sure we are still firing...
-		if (CONTROLS::IS_DISABLED_CONTROL_PRESSED(0, ControlAttack)) {
+    if ( weaponSoundTimerEnabled ) {
 
-			auto src = WEAPON::GET_WEAPONTYPE_GROUP(weap) == 970310034 ? 
-				IDR_DRYFIRE_RIFLE : IDR_DRYFIRE_SMG;
+        if ( GAMEPLAY::GET_GAME_TIMER() < weaponSoundPlayTime )
+            return;
+        // for delayed trigger sounds, make sure we are still firing...
+        if ( CONTROLS::IS_DISABLED_CONTROL_PRESSED( 0, ControlAttack ) ) {
 
-			PlaySoundResource(src, TRUE);
-		}
+            auto src = WEAPON::GET_WEAPONTYPE_GROUP( weap ) == 970310034 ?
+                       IDR_DRYFIRE_RIFLE : IDR_DRYFIRE_SMG;
 
-		weaponSoundTimerEnabled = false;
-	}
+            PlaySoundResource( src, TRUE );
+        }
+
+        weaponSoundTimerEnabled = false;
+    }
 }
 
 int lastAmmoInClip = 0;
 
-void run()
-{
-	while (true)
-	{
-		auto player = PLAYER::PLAYER_ID();
+void run() {
+    while ( true ) {
 
-		auto playerPed = PLAYER::GET_PLAYER_PED(player);
+        g_playerPed = PLAYER::PLAYER_PED_ID();
 
-		Hash currentWeapon;
+        Hash currentWeapon;
 
-		if (WEAPON::IS_PED_ARMED(playerPed, 4) &&
-			WEAPON::GET_CURRENT_PED_WEAPON(playerPed, &currentWeapon, TRUE)) {
+        if ( WEAPON::IS_PED_ARMED( g_playerPed, 4 ) ) {
+            if ( WEAPON::GET_CURRENT_PED_WEAPON( g_playerPed, &currentWeapon, TRUE ) ) {
 
-			updateWeaponSounds(currentWeapon);
+                updateWeaponSounds( currentWeapon );
 
-			int ammoInClip;
+                int ammoInClip;
 
-			WEAPON::GET_AMMO_IN_CLIP(playerPed, currentWeapon, &ammoInClip);
+                WEAPON::GET_AMMO_IN_CLIP( g_playerPed, currentWeapon, &ammoInClip );
 
-			if (ammoInClip <= 0 && !PED::IS_PED_RELOADING(playerPed)) {
+                const int totalAmmo = WEAPON::GET_AMMO_IN_PED_WEAPON( g_playerPed, currentWeapon );
 
-				CONTROLS::DISABLE_CONTROL_ACTION(0, ControlAttack, TRUE);
-				CONTROLS::DISABLE_CONTROL_ACTION(0, ControlAttack2, TRUE);
-				// firing with empty clip
-				if (CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED(0, ControlAttack)) {
+                if ( ammoInClip <= 0 && !PED::IS_PED_RELOADING( g_playerPed ) ) {
 
-					playEmptyChamberSound();
-				}
-				// clip just emptied
-				else if (lastAmmoInClip == 1) {
+                    CONTROLS::DISABLE_CONTROL_ACTION( 0, ControlAttack, TRUE );
+                    CONTROLS::DISABLE_CONTROL_ACTION( 0, ControlAttack2, TRUE );
+                    // firing with empty clip
+                    if ( CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED( 0, ControlAttack ) ) {
 
-					if (CWeapon* weapon = getCurrentPedWeapon(playerPed)) {
+                        playEmptyChamberSound();
+                    }
+                    // clip just emptied
+                    else if ( lastAmmoInClip == 1 ) {
 
-						float fTimeBetweenShots = *(float*)((uintptr_t)weapon->info + g_weaponInfoTimeBetweenShotsOffset);
+                        if ( CWeapon* weapon = getCurrentPedWeapon( g_playerPed ) ) {
 
-						playEmptyChamberSound((int)(fTimeBetweenShots * 1000.0f));
-					}
-				}
+                            const float fTimeBetweenShots = *( float* )( ( uintptr_t )weapon->info + g_weaponInfoTimeBetweenShotsOffset );
 
-				if (g_userConfig.UseReloadHelpText)
-				{
-					UI::BEGIN_TEXT_COMMAND_DISPLAY_HELP("STRING");
-					UI::ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME("Press ~INPUT_RELOAD~ to reload");
-					UI::END_TEXT_COMMAND_DISPLAY_HELP(0, 0, 1, -1);
-				}
+                            playEmptyChamberSound( ( int )( fTimeBetweenShots * 1000.0f ) );
+                        }
+                    }
 
-				else if (g_userConfig.UseReloadText)
-				{
-					g_reloadText.Draw();
-				}	
-			}
+                    // Only show the prompt if we actually have ammo to load
+                    if ( totalAmmo > 0 ) {
+                        if ( g_userConfig.UseReloadHelpText ) {
+                            UI::BEGIN_TEXT_COMMAND_DISPLAY_HELP( "STRING" );
+                            UI::ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME( "Press ~INPUT_RELOAD~ to reload" );
+                            UI::END_TEXT_COMMAND_DISPLAY_HELP( 0, 0, 1, -1 );
+                        }
 
-			lastAmmoInClip = ammoInClip;
+                        else if ( g_userConfig.UseReloadText ) {
+                            g_reloadText.Draw();
+                        }
+                    }
+                }
 
-			bReloadingWeapon = CONTROLS::IS_CONTROL_PRESSED(0, ControlReload) &&
-				ammoInClip < WEAPON::GET_MAX_AMMO_IN_CLIP(playerPed, currentWeapon, 1);
-		}		
+                lastAmmoInClip = ammoInClip;
 
-		WAIT(0);
-	}
+                bReloadingWeapon = CONTROLS::IS_CONTROL_PRESSED( 0, ControlReload ) && totalAmmo - ammoInClip > 0 &&
+                                   ammoInClip < WEAPON::GET_MAX_AMMO_IN_CLIP( g_playerPed, currentWeapon, 1 );
+            }
+
+            else {
+                // fixes problem where weapons can sometimes fire immediatley after switching.
+                CONTROLS::DISABLE_CONTROL_ACTION( 0, ControlAttack, TRUE );
+                CONTROLS::DISABLE_CONTROL_ACTION( 0, ControlAttack2, TRUE );
+            }
+        }
+
+        WAIT( 0 );
+    }
 }
 
-void unload()
-{
-	if (g_set_ammo_in_clip_orig_hook)
-		delete g_set_ammo_in_clip_orig_hook;
+void unload() {
+    if ( setWeaponFlagsPatch.active )
+        setWeaponFlagsPatch.remove();
 
-	if (g_reload_check_orig_hook)
-		delete g_reload_check_orig_hook;
-
-	if (g_task_weapon_flags_orig_hook)
-		delete g_task_weapon_flags_orig_hook;
-
-	if (setWeaponFlagsPatch.active)
-		setWeaponFlagsPatch.remove();
+    HookManager::Uninititialize();
 }

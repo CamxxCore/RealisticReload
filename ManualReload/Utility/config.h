@@ -1,100 +1,80 @@
 #pragma once
 #include <sstream>
 
-class CConfig
-{
-public:
-	CConfig() { }
+class CConfig {
+  public:
+    CConfig() { }
 
-	explicit CConfig(const char* fileName) : CConfig(fileName, false) { }
+    explicit CConfig( const char* fileName ) : CConfig( fileName, false ) { }
 
-	explicit CConfig(const char* fileName, bool customPath) {
+    explicit CConfig( const char* fileName, bool customPath ) {
 
-		if (!customPath)
-		{
-			TCHAR inBuf[MAX_PATH];
+        auto path = customPath ? fileName :
+                    Utility::GetWorkingDirectory() + "\\" + fileName;
+        strcpy_s( filename, &path[0] );
+    }
 
-			GetCurrentDirectory(sizeof(inBuf), inBuf);
+    bool getText( char * outBuffer, const char * section, const char * key ) const {
+        GetPrivateProfileString( TEXT( section ),
+                                 TEXT( key ),
+                                 NULL,
+                                 outBuffer,
+                                 sizeof( outBuffer ),
+                                 TEXT( filename ) );
 
-			strcat_s(inBuf, "\\");
+        return outBuffer &&
+               GetLastError() == ERROR_SUCCESS;
+    }
 
-			strcat_s(inBuf, fileName);
+    void setText( const char * section, const char * key, const char * value ) const {
+        WritePrivateProfileString( TEXT( section ),
+                                   TEXT( key ),
+                                   TEXT( value ),
+                                   filename );
+    }
 
-			strcpy_s(filename, inBuf);
-		}
+    template <typename T>
+    T get( const char * section, const char * key, T defaultValue ) {
+        T result{};
 
-		else strcpy_s(filename, fileName);
-	}
+        TCHAR inBuf[80];
 
-	bool getText(char * outBuffer, const char * section, const char * key) const
-	{
-		GetPrivateProfileString(TEXT(section),
-			TEXT(key),
-			NULL,
-			outBuffer,
-			sizeof(outBuffer),
-			TEXT(filename));
+        if ( !getText( inBuf, section, key ) )
+            return defaultValue;
 
-		return outBuffer &&
-			GetLastError() == ERROR_SUCCESS;
-	}
+        std::stringstream sstream;
 
-	void setText(const char * section, const char * key, const char * value) const
-	{
-		WritePrivateProfileString(TEXT(section),
-			TEXT(key),
-			TEXT(value),
-			filename);
-	}
+        sstream.imbue( std::locale( "en-us" ) );
 
-	template <typename T>
-	T get(const char * section, const char * key, T defaultValue)
-	{
-		T result{};
+        if ( typeid( T ) == typeid( bool ) ) {
+            sstream << std::boolalpha << inBuf;
+        }
 
-		TCHAR inBuf[80];
+        else {
+            sstream << inBuf;
+        }
 
-		if (!getText(inBuf, section, key))
-			return defaultValue;
+        sstream >> result;
 
-		std::stringstream sstream;
+        return result;
+    }
 
-		sstream.imbue(std::locale("en-us"));
+    template <typename T>
+    void set( const char * section, const char * key, T val ) {
+        std::stringstream sstream;
 
-		if (typeid(T) == typeid(bool))
-		{
-			sstream << std::boolalpha << inBuf;
-		}
+        sstream.imbue( std::locale( "en-us" ) );
 
-		else
-		{
-			sstream << inBuf;
-		}
+        if ( typeid( T ) == typeid( bool ) ) {
+            sstream << std::boolalpha << val;
+        }
 
-		sstream >> result;
+        else {
+            sstream << val;
+        }
 
-		return result;
-	}
+        setText( section, key, &sstream.str()[0] );
+    }
 
-	template <typename T>
-	void set(const char * section, const char * key, T val)
-	{
-		std::stringstream sstream;
-
-		sstream.imbue(std::locale("en-us"));
-
-		if (typeid(T) == typeid(bool))
-		{
-			sstream << std::boolalpha << val;
-		}
-
-		else
-		{
-			sstream << val;
-		}
-
-		setText(section, key, sstream.str().c_str());
-	}
-
-	TCHAR filename[MAX_PATH];
+    TCHAR filename[MAX_PATH];
 };

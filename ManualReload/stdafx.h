@@ -13,7 +13,6 @@
 #include <fstream>
 #include <memory>
 #include <string>
-
 #include "resource.h"
 
 #include "Utility/General.h"

@@ -1,39 +1,33 @@
 #include "stdafx.h"
 
-Logger::Logger() : path(Utility::GetModuleName(NULL) + ".log")
-{
+Logger::Logger() : path( Utility::GetModuleName( NULL ) + ".log" ) {
 }
 
-void Logger::Write(const char * format, ...) const
-{
-	char inBuf[MAX_STRING];
+void Logger::Write( const char * format, ... ) const {
+    char inBuf[MAX_STRING];
 
-	va_list va;
+    va_list va;
 
-	va_start(va, format);
+    va_start( va, format );
 
-	vsprintf_s(inBuf, format, va);
+    vsprintf_s( inBuf, format, va );
 
-	va_end(va);
+    va_end( va );
 
-	auto text = Utility::FormatString("[%s] [LOG] %s\n",
-		Utility::GetShortTimeString().c_str(), inBuf);
+    std::ofstream ofs( path, std::ios::app );
 
-	std::ofstream ofs(path, std::ios::app);
+    ofs << Utility::FormatString( "[%s] [LOG] %s\n",
+                                  Utility::GetShortTimeString().c_str(), inBuf );
 
-	ofs << text;
-
-	ofs.close();
+    ofs.close();
 }
 
-void Logger::Remove() const
-{
-	if (!Utility::FileExists(path)) return;
+void Logger::Remove() const {
+    if ( !Utility::FileExists( path ) ) return;
 
-	remove(path.c_str());
+    remove( path.c_str() );
 }
 
-Logger::~Logger()
-{
-	//Remove();
+Logger::~Logger() {
+    //Remove();
 }
