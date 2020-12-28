@@ -77,7 +77,7 @@ bool bReloadingWeapon = false;
 bool CWeapon_CanBeReloaded_Hook( CWeapon * weapon ) {
 
     if ( weapon->ammoInClip > 0 || weapon->pInventoryPed &&
-            weapon->pInventoryPed->GetOwner() != getScriptHandleBaseAddress( g_playerPed ) )
+         weapon->pInventoryPed->GetOwner() != getScriptHandleBaseAddress( g_playerPed ) )
         return g_reload_check_orig_hook->fn( weapon );
 
     return bReloadingWeapon;
@@ -145,7 +145,7 @@ bool initialize( const eGameVersion version ) {
         return false;
     }
 
-    g_reload_check_orig_hook->add( pattern.get( 43 ) ); 
+    g_reload_check_orig_hook->add( pattern.get( 43 ) );
 
     #pragma endregion
 
