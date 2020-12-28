@@ -77,7 +77,7 @@ bool bReloadingWeapon = false;
 bool CWeapon_CanBeReloaded_Hook( CWeapon * weapon ) {
 
     if ( weapon->ammoInClip > 0 || weapon->pInventoryPed &&
-         weapon->pInventoryPed->GetOwner() != getScriptHandleBaseAddress( g_playerPed ) )
+            weapon->pInventoryPed->GetOwner() != getScriptHandleBaseAddress( g_playerPed ) )
         return g_reload_check_orig_hook->fn( weapon );
 
     return bReloadingWeapon;
@@ -124,14 +124,15 @@ bool initialize( const eGameVersion version ) {
 
     #pragma region CanBeReloaded Hook (CTaskGun::UpdateBasic)
 
-    auto pattern = BytePattern( ( BYTE* )"\xB8\x04\x00\x00\x00\x44\x3B\x00\x74\x17\x84\x00\x00\x00\x00\x00", "xxxxxxx?xxx?????" );
+    //B8 ? ? ? ? 44 3B E8 74 1C
+    auto pattern = BytePattern( ( BYTE* )"\xB8\x04\x00\x00\x00\x44\x3B\xE8\x74\x1C", "x????xxxxx" ); //BB 04 00 00 00 44 3B ? 74 17 84
 
     if ( !pattern.bSuccess ) {
         LOG( "Failed to find address #1. Exiting..." );
         return false;
     }
 
-    g_reload_check_orig_hook = HookManager::SetCall( pattern.get( 36 ), CWeapon_CanBeReloaded_Hook );
+    g_reload_check_orig_hook = HookManager::SetCall( pattern.get( 44 ), CWeapon_CanBeReloaded_Hook );
 
     #pragma endregion
 
@@ -144,7 +145,7 @@ bool initialize( const eGameVersion version ) {
         return false;
     }
 
-    g_reload_check_orig_hook->add( pattern.get( 43 ) );
+    g_reload_check_orig_hook->add( pattern.get( 43 ) ); 
 
     #pragma endregion
 
@@ -157,7 +158,7 @@ bool initialize( const eGameVersion version ) {
         return false;
     }
 
-//	g_task_on_swap_weap_hook = HookManager::SetJmp((PBYTE)pattern.get(5), CTaskSwapWeapon_UpdateOnSwap_Hook);
+    //	g_task_on_swap_weap_hook = HookManager::SetJmp((PBYTE)pattern.get(5), CTaskSwapWeapon_UpdateOnSwap_Hook);
 
     #pragma endregion
 
@@ -209,14 +210,14 @@ bool initialize( const eGameVersion version ) {
     if ( version > VER_1_0_463_1_NOSTEAM ) {
         #pragma region SetAmmoInClip (CTaskReloadWeapon)
 
-        pattern = BytePattern( ( BYTE* )"\x31\x82\x00\x00\x00\x00\x80\x79\x36\x01", "xx????xxxx" );
-
+        //48 8D 15 ? ? ? ? 48 8B CF E8 ? ? ? ? 84 C0 74 14 80
+        pattern = BytePattern( ( BYTE* )"\x48\x8D\x15\x00\x00\x00\x00\x48\x8B\xCF\xE8\x00\x00\x00\x00\x84\xC0\x74\x14\x80", "xxx????xxxx????xxxxx" );
         if ( !pattern.bSuccess ) {
             LOG( "Failed to find address #6. Exiting..." );
             return false;
         }
 
-        address = pattern.get( 13 );
+        address = pattern.get( -11 );
 
         address = *( int32_t* )address + address + 168;
 
@@ -234,13 +235,17 @@ bool initialize( const eGameVersion version ) {
 
         pattern = BytePattern( ( BYTE* )"\x44\x38\x2D\x00\x00\x00\x00\x74\x1B\x48\x8B\x47\x20", "xxx????xxxxxx" );
 
-        if ( pattern.bSuccess ) {
-            address = pattern.get( 3 );
-
-            address = *( int32_t* )address + address + 4;
-
-            *( BOOL* )address = 1; // always use ammo inventory
+        if ( !pattern.bSuccess ) {
+            LOG( "Failed to find address #7. Exiting..." );
+            return false;
         }
+
+        address = pattern.get( 3 );
+
+        address = *( int32_t* )address + address + 4;
+
+        *( BOOL* )address = 1; // always use ammo inventory
+
 
         #pragma endregion
     }
